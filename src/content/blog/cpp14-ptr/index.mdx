@@ -1,0 +1,343 @@
+---
+title: C++14——智能指针与锁与条件变量
+publishDate: 2024-03-07 02:56:00
+description: 'C++智能指针都在库文件 <memory> 中被定义'
+tags:
+  - cpp
+  - 智能指针
+heroImage: { src: './thumbnail.jpg', color: '#B4C6DA' }
+language: 'Chinese'
+---
+## unique_ptr
+
+### 使用
+
+`unique_ptr` 声明了对内存资源的单一所有权，它只能被移动(`move`)，而不能被复制。
+我们可以用 `make_unique` 来产生 `unique_ptr` 对象。
+
+```cpp
+auto uptr1 = std::make_unique<int>{100};
+
+std::unique_ptr<int> uptr2 = uptr1;		//会报错，unique_ptr不能被复制
+
+std::unique_ptr<int> uptr3 = std::move(uptr1);		//正确，此时uptr1失效
+```
+
+
+### 原理
+
+`unique_ptr` 的实现可以参照以下代码
+
+```cpp
+namespace std {
+    template <typename T, typename D = default_delete<T>>
+    class unique_ptr
+    {
+    public:
+        explicit unique_ptr(pointer p) noexcept;
+        ~unique_ptr() noexcept;
+
+		T& operator*() const;
+        T* operator->() const noexcept;
+		unique_ptr(const unique_ptr &) = delete;
+        unique_ptr& operator=(const unique_ptr &) = delete;
+		unique_ptr(unique_ptr &&) noexcept;
+		unique_ptr& operator=(unique_ptr &&) noexcept;
+	// ...
+    private:
+        pointer __ptr;
+    };
+}
+```
+
+可以发现：
+- `unique_ptr` 内部存储了指向对象的裸指针。
+- 对于初始构造函数，`explicit` 强调隐式转换是不被允许的。
+- 对于析构函数，缺省情况下调用 `delete`。
+- 我们可以用`->` 和 `*` 访问 `unique_ptr` 成员。
+- 拷贝构造和 `=` 复制被禁止。
+- 而作为右值的移动构造则被允许，我们可以用 `std::move` 来进行。
+
+
+### 详细
+
+丰富以上代码细节：
+
+```cpp
+template<typename T>
+class unique_ptr
+{
+public:
+	explicit unique_ptr(T* ptr_ = nullptr) noexcept
+	: ptr{ptr_} {}
+	~unique_ptr()
+	{
+		if(ptr)
+			delete ptr;
+	}
+
+	T& operator*() const noexcept {return *ptr;}
+	T* operator->() const noexcept {return ptr;}
+
+	unique_ptr(const unique_ptr<T>& ) = delete;
+	unique_ptr<T>& operator=(const unique_ptr<T>& ) = delete;
+
+	unique_ptr(unique_ptr<T> &&ptr_) noexcept
+	: ptr{std::move(ptr_)} {}
+	unique_ptr<T>& operator=(unique_ptr<T> &&uptr) noexcept
+	{
+		//考虑自赋值
+		this->swap(*this, uptr);
+		return *this;
+	}
+
+	T* get() const noexcept {return ptr;}
+	void reset(T* ptr_ = nullptr)
+	{
+		if(ptr != ptr_)
+		{
+			if(ptr)
+				delete ptr;
+			ptr = ptr_;
+		}
+	}
+	unique_ptr<T> release()
+	{
+		T* ret = ptr;
+		ptr = nullptr;
+		return ret;
+	}
+	void swap(unique_ptr<T>& uptr)
+	{
+		std::swap(ptr, uptr.ptr);
+	}
+	explicit operator bool() const noexcept {return ptr}
+private:
+	T* ptr;
+}
+```
+
+参考：https://www.jianshu.com/p/77c2988be336
+
+有如下细节：
+1. 函数后使用 `noexcept` 告知编译器本函数不会产生异常，防止产生多余代码。
+2. 使用 `explicit` 防止隐式转换。
+3. 用 `swap` 函数实现 `operator=` 操作。
+	- 自赋值情况并不多，用 `*this == p` 判断耗时。
+	- 无需再做自赋值检查，相比之下更省时，代码也精简。
+	- 交换之后，当前对象现在拥有了原先临时对象的资源，而临时对象则获得了当前对象原来的资源。延后了针对 `unique_ptr` 内置指针成员的 `delete` 操作。这意味着临时的 `unique_ptr` 超出作用域之前，是潜在的可再次使用的。当其超出作用域后，`unique_ptr` 的析构函数会将其正确销毁。
+		1. **异常安全**：如果 `new` 或其他资源分配如 `ptr = other.ptr;` 在赋值过程中发生了异常，使用 `swap` 可以避免资源泄露。因为交换操作本身是不会抛出异常的（`std::swap` 特化通常都具有 `noexcept` 保证），且当前对象和临时对象都已经拥有了各自的资源。这就避免了在异常发生时半途中断造成资源的不一致或泄漏。
+		2.  **资源复用**：移动赋值的语义意味着临时对象失去了资源的所有权。但在实际操作中，现在它拥有了之前 `this` 对象的资源，这些资源可能在其他场景中还可以使用。
+4. `bool` 值转换功能，以便能把对象置于条件语句中判断。
+	 ```cpp
+    std::unique_ptr<int> ptr(new int(42));
+
+    if (ptr) std::cout << "before reset, ptr is: " << *ptr << '\n';
+    ptr.reset();
+    if (ptr) std::cout<< "after reset, ptr is: " << *ptr << '\n';
+	```
+
+	记得添加 `explicit`，否则会出以下问题：
+
+	```cpp
+	std::unique_ptr<int> p1(new int(13));
+	std::unique_ptr<int> p2(new int(14));
+
+	if(p1 == p2)
+	{
+	    //p1 p2 都会被转换为bool值，都为true,因此结果是两者相等。
+	    std::cout << "p1 is equal p2" << endl;
+	}
+
+	//输出： p1 is equal p2
+	```
+
+
+### make_unique
+
+`make_unique` 在 `C++11` 提出，在 `C++14` 中提供。
+
+```cpp
+template <typename T, typename... Ts>
+std::unique_ptr<T> make_unique( Ts&&... params ) {
+    return std::unique_ptr<T>( new T( std::forward<Ts>(params)... ) );
+}
+```
+
+## 异常安全
+
+考虑以下场景：
+
+```cpp
+//声明
+void processData(std::unique_ptr<Data> dt, int size);
+
+//调用它, 无法通过编译，隐式转换不被允许
+processData(new Data, get_size());
+
+//调用它
+processData(std::unique_ptr<Data>(new Data), get_size());
+```
+
+可以肯定 `new` 的执行在 `unique_ptr` 构造函数之前，而 `get_size()` 的执行次序是不清楚的，第一、二、三步都可以。以最坏的情况考虑：
+1. 执行 `new Data`。
+2. 调用 `get_size()`。
+3. 调用 `unique_ptr` 构造函数。
+
+倘若在 `get_size()` 时发生了异常，那么此时new返回的指针会丢失，这样就发生了内存泄露。
+
+我们可以把 `new Data` 和 `unique_ptr` 构造函数整合在一块来避免这种可能性，即 `make_unique`。
+
+```cpp
+//安全地调用
+processData(std::make_unique<Data>(), get_size());
+```
+
+
+## shared_ptr
+loading
+## weak_ptr
+
+## 锁应用
+
+### 互斥锁
+
+#### lock_guard
+
+`std::lock_guard`：
+- 提供简单的封装来管理互斥锁的上锁和解锁操作。
+- 构造函数获取互斥锁（上锁），析构函数释放互斥锁（解锁）。
+- 它的行为类似于一个简单的作用域锁，当作用域结束时释放锁。
+- 使用 `std::lock_guard` 时，你不能手动解锁互斥锁，互斥锁被锁定的周期与 `std::lock_guard` 对象的声明周期相同，可以手动用 `\{}` 创造作用域。
+- 它不能与条件变量搭配使用，因为条件变量需要在一些情况下手动解锁和上锁。
+
+```cpp
+std::mutex mtx;
+void func() {
+    std::lock_guard<std::mutex> lock(mtx);
+    // 互斥区域开始
+    // ...
+    // 互斥区域结束
+}
+```
+或者：
+
+```cpp
+std::mutex mtx;
+void func() {
+	// 不想互斥的代码
+	// ...
+	{
+		std::lock_guard<std::mutex> lock(mtx);
+    	// 互斥区域开始
+    	// ...
+    	// 互斥区域结束
+	}
+	// ...
+}
+```
+
+#### unique_lock
+
+`std::unique_lock` 比 `std::lock_guard` 要更灵活，但是开销也相对大些：
+- 比 `std::lock_guard` 提供了更多的灵活性。
+- 可以在运行时进行上锁和解锁操作。
+- 可以在多个不同的作用域中重复使用。
+- 可以以非阻塞方式构造，选择在未来某个点上锁。
+- 可以移交 `std::unique_lock` 对象的所有权（可以从函数返回 `std::unique_lock` 对象或作为参数传递）。
+- 可以与条件变量搭配使用。
+
+##### 手动解锁与上锁：
+```cpp
+std::mutex mtx;
+void func() {
+    std::unique_lock<std::mutex> lock(mtx);
+    // 互斥区域开始
+    // ...
+    lock.unlock(); // 手动解锁
+
+    // 执行一些非保护代码
+    // ...
+
+    lock.lock();   // 再次上锁
+    // ...
+    // lock析构时自动解锁
+}
+
+```
+
+##### 延迟绑定
+
+```cpp
+   std::mutex mtx;
+   void deferredLockingFunction() {
+       std::unique_lock<std::mutex> lock(mtx, std::defer_lock);
+       // ... 执行一些准备工作 ...
+       lock.lock(); // 在需要时上锁
+       // ... 执行一些受保护的操作 ...
+   }
+```
+
+
+##### 转移锁
+
+```cpp
+   std::mutex mtx;
+   std::unique_lock<std::mutex> getLock() {
+       std::unique_lock<std::mutex> lock(mtx);
+       // ... 执行一些受保护的操作 ...
+       return lock; // 锁对象被转移
+   }
+```
+
+### shared_mutex
+
+可以用于读写函数互斥(读进程之间不互斥，写进程阻塞其他读写进程)
+
+```cpp
+std::string data; // 共享数据
+std::shared_mutex rw_mutex; // 用于保护共享数据的读写锁
+
+// 模拟读取操作
+void reader(int id) {
+    std::shared_lock<std::shared_mutex> lock(rw_mutex); // 获取共享锁
+    std::cout << "Reader " << id << " sees data = " << data << std::endl;
+    // shared_lock 自动释放
+}
+
+// 模拟写入操作
+void writer(int id, const std::string& newData) {
+    std::unique_lock<std::shared_mutex> lock(rw_mutex); // 获取独占锁
+    data = newData;
+    std::cout << "Writer " << id << " updated data to " << data << std::endl;
+    // unique_lock 自动释放
+}
+```
+
+### condition_variable
+
+通常配合互斥锁实现线程同步：
+
+```cpp
+std::mutex mtx;
+std::condition_variable cv; // 条件变量
+bool ready = false; // 条件变量关联的条件
+
+// 等待条件成立
+void workerThread(int id) {
+    std::unique_lock<std::mutex> lock(mtx);
+    // 等待条件变量被通知（条件成立）
+    cv.wait(lock, []{ return ready; });
+    std::cout << "Worker thread " << id << " is processing datan";
+}
+
+void setDataReady() {
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        ready = true;
+    }
+
+    // cv.notify_one(); // 如果只需要通知一个线程
+    cv.notify_all(); // 如果希望通知所有线程
+}
+```

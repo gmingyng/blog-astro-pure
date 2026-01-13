@@ -1,0 +1,223 @@
+---
+title: WordPress 主题 Sakura美化
+publishDate: 2022-09-25 14:45:00
+description: 'WordPress 主题 Sakura美化'
+tags:
+  - wordpress
+  - web
+heroImage: { src: './thumbnail.jpg', color: '#B4C6DA' }
+language: 'Chinese'
+---
+以下是为您转化后的 Markdown 格式文档，保留了原文的所有内容、代码和链接：
+
+# I.视觉效果
+
+### 首页文章卡片鼠标悬停阴影+图片旋转效果
+
+F12定位对应css代码
+
+修改style.css中对应代码
+
+```css
+.post-list-thumb {
+    will-change: transform;
+    float: left;
+    width: 100%;
+    height: 300px;
+    position: relative;
+    margin: 20px 0 20px;
+    border-radius: 10px;
+    background-color: rgba(255, 255, 255, 0);
+    box-shadow: 0 1px 20px -8px rgba(0, 0, 0, .5);
+    opacity: 0;
+    -webkit-transition: box-shadow .3s ease; //动画过渡时间
+    transition: box-shadow .3s ease
+}
+
+.post-list-thumb:hover {
+    -webkit-box-shadow:0 5px 10px 5px rgba(110,110,110,.5);
+    box-shadow:0 5px 10px 5px rgba(110,110,110,.5)
+}
+
+.post-list-thumb:hover img{
+    -webkit-transform:scale(1.2) rotate(5deg);
+    transform:scale(1.2) rotate(5deg)
+}
+
+```
+
+### 首页添加波浪线
+
+参考 [https://2heng.xin/theme-sakura/](https://2heng.xin/theme-sakura/)
+
+修改header.php如下(或者到layouts/imgbox.php开始部分加上相同代码)
+
+再在style.css最后加上如下代码
+
+```css
+@-webkit-keyframes wave1/*Safari and Chrome*/
+{
+0% { left:-1500px;bottom:-5px}
+    50%{ left:0px;bottom:0px}
+    100%{ left:-1500px;bottom:-5px}
+}
+ 
+@-webkit-keyframes wave2
+{
+0% { left:-1450px}
+    50%{ left:0px}
+    100%{left:-1450px}
+ 
+}
+@keyframes wave1/*Safari and Chrome*/
+{
+0% { left:-1500px;bottom:-5px}
+    50%{ left:0px;bottom:0px}
+    100%{ left:-1500px;bottom:-5px}
+}
+ 
+@keyframes wave2
+{
+0% { left:-1450px}
+    50%{ left:0px}
+    100%{left:-1450px}
+ 
+}
+#banner_wave_1 {
+    width:auto;
+    height:65px;
+    background:url("http://cdn.jsdelivr.net/gh/yremp/resource@2.0/img/other/wave1.png") repeat-x;
+    _filter:alpha(opacity=80);
+    position:absolute;
+    bottom:0;
+    width:400%;
+    left:-236px;
+    z-index:5;
+    opacity:1;
+    transiton-property:opacity,bottom;
+    animation:wave1 90s infinite;
+    -webkit-animation:wave1 90s infinite;
+}
+#banner_wave_2 {
+    width:auto;
+    height:80px;
+    background:url("http://cdn.jsdelivr.net/gh/yremp/resource@2.0/img/other/wave2.png") repeat-x;
+    _filter:alpha(opacity=80);
+    position:absolute;
+    bottom:0;
+    width:400%;
+    left:0;
+    z-index:4;
+    opacity:1;
+    transiton-property:opacity,bottom;
+    animation:wave2 90s infinite;
+    -webkit-animation:wave2 90s infinite;
+}
+.banner_wave_hide,.banner_wave_hide_fit_skin {
+    opacity:0 !important;
+    bottom:-999px !important
+}
+@media(max-width:860px) {
+    #banner_wave_1,#banner_wave_2 {
+    display:inline-block;
+    
+}
+@-webkit-keyframes wave1/*Safari and Chrome*/
+{
+0% { left:-750px;bottom:-2px}
+    50%{ left:0px;bottom:0px}
+    100%{ left:-750px;bottom:-2px}
+}
+ 
+@-webkit-keyframes wave2
+{
+0% { left:-750px}
+    50%{ left:0px}
+    100%{left:-750px}
+ 
+}
+@keyframes wave1/*Safari and Chrome*/
+{
+0% { left:-750px;bottom:-2px}
+    50%{ left:0px;bottom:0px}
+    100%{ left:-750px;bottom:-2px}
+}
+ 
+@keyframes wave2
+{
+0% { left:-750px}
+    50%{ left:0px}
+    100%{left:-750px}
+ 
+}
+#banner_wave_1 {
+    width:auto;
+    height:65px;
+    background:url("https://cdn.jsdelivr.net/gh/yremp/resource@2.0/img/other/wave1.png") repeat-x;
+    _filter:alpha(opacity=80);
+    position:absolute;
+    bottom:0;
+    width:400%;
+    left:750px;
+    z-index:5;
+    opacity:1;
+    transiton-property:opacity,bottom;
+    animation:wave1 90s infinite;
+    -webkit-animation:wave1 60s infinite;
+}
+#banner_wave_2 {
+    width:auto;
+    height:80px;
+    background:url("https://cdn.jsdelivr.net/gh/yremp/resource@2.0/img/other/wave2.png") repeat-x;
+    _filter:alpha(opacity=80);
+    position:absolute;
+    bottom:0;
+    width:400%;
+    left:0;
+    z-index:4;
+    opacity:1;
+    transiton-property:opacity,bottom;
+    animation:wave2 90s infinite;
+    -webkit-animation:wave2 60s infinite;
+ }
+}
+
+```
+
+### 修改style.css不生效的解决方法
+
+参考我爱水煮鱼BLOG的 [WordPress 技巧：移除加载的 JS 和 CSS 文件后面的 ver 参数](https://www.yeah-gong.cn/wp-content/themes/begin/go.php?url=aHR0cHM6Ly9ibG9nLndwamFtLmNvbS9tL3JlbW92ZS1qcy1jc3MtdmVyLWFyZy8=)
+
+第一种方法，如果是自己的主题或者插件，使用 `wp_enqueue_script` 函数时候，第四个参数设置为 false：
+
+```php
+wp_enqueue_script('foo', 'http://example.com/foo.js', false, null);
+
+```
+
+如果其他人得插件或者主题，我们不可能每次去修改这些插件或者主题，在主题的 `functions.php` 文件中加入以下代码：
+
+```php
+add_filter('script_loader_src',    'wpjam_loader_src',10,2);
+add_filter('style_loader_src',    'wpjam_loader_src',10,2);
+function wpjam_loader_src($src, $handle){
+    return remove_query_arg(array('ver'), $src);
+}
+
+```
+
+### 修改鼠标图像
+
+在style.css中找到如下类代码：
+
+```css
+cursor:url(https://cdn.jsdelivr.net/gh/moezx/cdn@3.1.9/img/Sakura/cursor/*.cur), auto
+
+```
+
+把地址替换即可实现。
+
+## 接下来的目标：
+
+1. 增加点击特效
+2. 进入文章后导航栏会影响图片显示，考虑翻到最上面时应该变透明

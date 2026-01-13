@@ -1,0 +1,1416 @@
+---
+title: 操作系统真象还原笔记——文件系统
+publishDate: 2024-02-27 05:59:00
+description: '文件系统是操作系统中负责管理持久化数据的核心模块。miniOS 采用了类似于 Unix V6 或 Minix 的经典索引节点（Inode）式文件系统。'
+tags:
+  - linux
+  - os
+  - filesystem
+heroImage: { src: './thumbnail.jpg', color: '#B4C6DA' }
+language: 'Chinese'
+---
+文件是存储在硬盘上的，硬盘的最小存储单位叫做扇区 `sector`，每个扇区存储 `512` 字节。操作系统一次性读取一个块 `block`。`block` 由多个扇区组成，一般大小为 `4KB`，是文件存取的最小单位。
+
+linux中把文件信息和文件数据分开存放，一个文件对应一个 `inode`，`inode` 用于存储文件相关信息，其数量在格式化时就已确定，所有的 `inode` 通过 `inode_table` 数组来存储，同时minios使用位图来管理 `inode`。
+
+至于文件名则与目录项相关联，目录本身也是一种文件，一个目录的目录项中包含对应文件的文件名，`inode` 编号，文件类型等信息。
+
+用户通过文件名检索：
+1. 首先会检索到对应的目录项
+2. 通过目录项找到对应 `inode` 编号。
+3. 通过编号访问 `inode_table` 获得 `inode`。
+4. 通过 `inode` 存储的地址访问文件数据块。
+
+---
+
+<h2>
+文件系统结构
+</h2>
+
+[![](http://121.40.138.116/wp-blog/wp-content/uploads/2024/02/3e0baa82e518679f16593cb423ea7a3.png)](http://121.40.138.116/wp-blog/wp-content/uploads/2024/02/3e0baa82e518679f16593cb423ea7a3.png)
+
+<h3>
+超级块
+</h3>
+
+超级块存储了整个文件系统的信息。
+
+```c
+/* 超级块 */
+struct super_block {
+   uint32_t magic;		    // 用来标识文件系统类型,支持多文件系统的操作系统通过此标志来识别文件系统类型
+   uint32_t sec_cnt;		    // 本分区总共的扇区数
+   uint32_t inode_cnt;		    // 本分区中inode数量
+   uint32_t part_lba_base;	    // 本分区的起始lba地址
+
+   uint32_t block_bitmap_lba;	    // 块位图本身起始扇区地址
+   uint32_t block_bitmap_sects;     // 扇区位图本身占用的扇区数量
+
+   uint32_t inode_bitmap_lba;	    // i结点位图起始扇区lba地址
+   uint32_t inode_bitmap_sects;	    // i结点位图占用的扇区数量
+
+   uint32_t inode_table_lba;	    // i结点表起始扇区lba地址
+   uint32_t inode_table_sects;	    // i结点表占用的扇区数量
+
+   uint32_t data_start_lba;	    // 数据区开始的第一个扇区号
+   uint32_t root_inode_no;	    // 根目录所在的I结点号
+   uint32_t dir_entry_size;	    // 目录项大小
+
+   uint8_t  pad[460];		    // 加上460字节,凑够512字节1扇区大小
+} __attribute__ ((packed));
+```
+
+`__attribute__ ((packed))` 取消结构体内内存对齐，保证其在一个 `block` 内。
+
+<h3>
+inode
+</h3>
+
+这里只实现一级间接指针。
+
+```c
+/* inode结构 */
+struct inode {
+   uint32_t i_no;    // inode编号
+
+/* 当此inode是文件时,i_size是指文件大小,
+若此inode是目录,i_size是指该目录下所有目录项大小之和*/
+   uint32_t i_size;
+
+   uint32_t i_open_cnts;   // 记录此文件被打开的次数
+   bool write_deny;	   // 写文件不能并行,进程写文件前检查此标识
+
+/* i_sectors[0-11]是直接块, i_sectors[12]用来存储一级间接块指针 */
+   uint32_t i_sectors[13];
+   struct list_elem inode_tag;
+};
+```
+
+
+<h3>
+目录及目录项
+</h3>
+
+```c
+#define MAX_FILE_NAME_LEN  16	 // 最大文件名长度
+
+/* 目录结构 */
+struct dir {
+   struct inode* inode;
+   uint32_t dir_pos;	  // 记录在目录内的偏移
+   uint8_t dir_buf[512];  // 目录的数据缓存
+};
+
+/* 目录项结构 */
+struct dir_entry {
+   char filename[MAX_FILE_NAME_LEN];  // 普通文件或目录名称
+   uint32_t i_no;		      // 普通文件或目录对应的inode编号
+   enum file_types f_type;	      // 文件类型
+};
+```
+
+
+<h2>
+创建文件系统
+</h2>
+
+
+<h3>
+格式化分区
+</h3>
+
+```c
+/* 格式化分区,也就是初始化分区的元信息,创建文件系统 */
+static void partition_format(struct partition* part) {
+/* 为方便实现,一个块大小是一扇区 */
+   uint32_t boot_sector_sects = 1;
+   uint32_t super_block_sects = 1;
+   uint32_t inode_bitmap_sects = DIV_ROUND_UP(MAX_FILES_PER_PART, BITS_PER_SECTOR);	   // I结点位图占用的扇区数.最多支持4096个文件
+   uint32_t inode_table_sects = DIV_ROUND_UP(((sizeof(struct inode) * MAX_FILES_PER_PART)), SECTOR_SIZE);
+   uint32_t used_sects = boot_sector_sects + super_block_sects + inode_bitmap_sects + inode_table_sects;
+   uint32_t free_sects = part->sec_cnt - used_sects;
+
+/************** 简单处理块位图占据的扇区数 ***************/
+   uint32_t block_bitmap_sects;
+   block_bitmap_sects = DIV_ROUND_UP(free_sects, BITS_PER_SECTOR);
+   /* block_bitmap_bit_len是位图中位的长度,也是可用块的数量 */
+   uint32_t block_bitmap_bit_len = free_sects - block_bitmap_sects; 
+   block_bitmap_sects = DIV_ROUND_UP(block_bitmap_bit_len, BITS_PER_SECTOR); 
+/*********************************************************/
+
+   /* 超级块初始化 */
+   struct super_block sb;
+   sb.magic = 0x19590318;
+   sb.sec_cnt = part->sec_cnt;
+   sb.inode_cnt = MAX_FILES_PER_PART;
+   sb.part_lba_base = part->start_lba;
+
+   sb.block_bitmap_lba = sb.part_lba_base + 2;	 // 第0块是引导块,第1块是超级块
+   sb.block_bitmap_sects = block_bitmap_sects;
+
+   sb.inode_bitmap_lba = sb.block_bitmap_lba + sb.block_bitmap_sects;
+   sb.inode_bitmap_sects = inode_bitmap_sects;
+
+   sb.inode_table_lba = sb.inode_bitmap_lba + sb.inode_bitmap_sects;
+   sb.inode_table_sects = inode_table_sects; 
+
+   sb.data_start_lba = sb.inode_table_lba + sb.inode_table_sects;
+   sb.root_inode_no = 0;
+   sb.dir_entry_size = sizeof(struct dir_entry);
+
+   printk("%s info:\n", part->name);
+   printk("   magic:0x%x\n   part_lba_base:0x%x\n   all_sectors:0x%x\n   inode_cnt:0x%x\n   block_bitmap_lba:0x%x\n   block_bitmap_sectors:0x%x\n   inode_bitmap_lba:0x%x\n   inode_bitmap_sectors:0x%x\n   inode_table_lba:0x%x\n   inode_table_sectors:0x%x\n   data_start_lba:0x%x\n", sb.magic, sb.part_lba_base, sb.sec_cnt, sb.inode_cnt, sb.block_bitmap_lba, sb.block_bitmap_sects, sb.inode_bitmap_lba, sb.inode_bitmap_sects, sb.inode_table_lba, sb.inode_table_sects, sb.data_start_lba);
+
+   struct disk* hd = part->my_disk;
+/*******************************
+ * 1 将超级块写入本分区的1扇区 *
+ ******************************/
+   ide_write(hd, part->start_lba + 1, &sb, 1);
+   printk("   super_block_lba:0x%x\n", part->start_lba + 1);
+
+/* 找出数据量最大的元信息,用其尺寸做存储缓冲区*/
+   uint32_t buf_size = (sb.block_bitmap_sects >= sb.inode_bitmap_sects ? sb.block_bitmap_sects : sb.inode_bitmap_sects);
+   buf_size = (buf_size >= sb.inode_table_sects ? buf_size : sb.inode_table_sects) * SECTOR_SIZE;
+   uint8_t* buf = (uint8_t*)sys_malloc(buf_size);	// 申请的内存由内存管理系统清0后返回
+   
+/**************************************
+ * 2 将块位图初始化并写入sb.block_bitmap_lba *
+ *************************************/
+   /* 初始化块位图block_bitmap */
+   buf[0] |= 0x01;       // 第0个块预留给根目录,位图中先占位
+   uint32_t block_bitmap_last_byte = block_bitmap_bit_len / 8;
+   uint8_t  block_bitmap_last_bit  = block_bitmap_bit_len % 8;
+   uint32_t last_size = SECTOR_SIZE - (block_bitmap_last_byte % SECTOR_SIZE);	     // last_size是位图所在最后一个扇区中，不足一扇区的其余部分
+
+   /* 1 先将位图最后一字节到其所在的扇区的结束全置为1,即超出实际块数的部分直接置为已占用*/
+   memset(&buf[block_bitmap_last_byte], 0xff, last_size);
+   
+   /* 2 再将上一步中覆盖的最后一字节内的有效位重新置0 */
+   uint8_t bit_idx = 0;
+   while (bit_idx <= block_bitmap_last_bit) {
+      buf[block_bitmap_last_byte] &= ~(1 << bit_idx++);
+   }
+   ide_write(hd, sb.block_bitmap_lba, buf, sb.block_bitmap_sects);
+
+/***************************************
+ * 3 将inode位图初始化并写入sb.inode_bitmap_lba *
+ ***************************************/
+   /* 先清空缓冲区*/
+   memset(buf, 0, buf_size);
+   buf[0] |= 0x1;      // 第0个inode分给了根目录
+   /* 由于inode_table中共4096个inode,位图inode_bitmap正好占用1扇区,
+    * 即inode_bitmap_sects等于1, 所以位图中的位全都代表inode_table中的inode,
+    * 无须再像block_bitmap那样单独处理最后一扇区的剩余部分,
+    * inode_bitmap所在的扇区中没有多余的无效位 */
+   ide_write(hd, sb.inode_bitmap_lba, buf, sb.inode_bitmap_sects);
+
+/***************************************
+ * 4 将inode数组初始化并写入sb.inode_table_lba *
+ ***************************************/
+ /* 准备写inode_table中的第0项,即根目录所在的inode */
+   memset(buf, 0, buf_size);  // 先清空缓冲区buf
+   struct inode* i = (struct inode*)buf; 
+   i->i_size = sb.dir_entry_size * 2;	 // .和..
+   i->i_no = 0;   // 根目录占inode数组中第0个inode
+   i->i_sectors[0] = sb.data_start_lba;	     // 由于上面的memset,i_sectors数组的其它元素都初始化为0 
+   ide_write(hd, sb.inode_table_lba, buf, sb.inode_table_sects);
+   
+/***************************************
+ * 5 将根目录初始化并写入sb.data_start_lba
+ ***************************************/
+   /* 写入根目录的两个目录项.和.. */
+   memset(buf, 0, buf_size);
+   struct dir_entry* p_de = (struct dir_entry*)buf;
+
+   /* 初始化当前目录"." */
+   memcpy(p_de->filename, ".", 1);
+   p_de->i_no = 0;
+   p_de->f_type = FT_DIRECTORY;
+   p_de++;
+
+   /* 初始化当前目录父目录".." */
+   memcpy(p_de->filename, "..", 2);
+   p_de->i_no = 0;   // 根目录的父目录依然是根目录自己
+   p_de->f_type = FT_DIRECTORY;
+
+   /* sb.data_start_lba已经分配给了根目录,里面是根目录的目录项 */
+   ide_write(hd, sb.data_start_lba, buf, 1);
+
+   printk("   root_dir_lba:0x%x\n", sb.data_start_lba);
+   printk("%s format done\n", part->name);
+   sys_free(buf);
+}
+
+/* 将最上层路径名称解析出来 */
+char* path_parse(char* pathname, char* name_store) {
+   if (pathname[0] == '/') {   // 根目录不需要单独解析
+    /* 路径中出现1个或多个连续的字符'/',将这些'/'跳过,如"///a/b" */
+       while(*(++pathname) == '/');
+   }
+
+   /* 开始一般的路径解析 */
+   while (*pathname != '/' && *pathname != 0) {
+      *name_store++ = *pathname++;
+   }
+
+   if (pathname[0] == 0) {   // 若路径字符串为空则返回NULL
+      return NULL;
+   }
+   return pathname; 
+}
+
+/* 返回路径深度,比如/a/b/c,深度为3 */
+int32_t path_depth_cnt(char* pathname) {
+   ASSERT(pathname != NULL);
+   char* p = pathname;
+   char name[MAX_FILE_NAME_LEN];       // 用于path_parse的参数做路径解析
+   uint32_t depth = 0;
+
+   /* 解析路径,从中拆分出各级名称 */ 
+   p = path_parse(p, name);
+   while (name[0]) {
+      depth++;
+      memset(name, 0, MAX_FILE_NAME_LEN);
+      if (p) {	     // 如果p不等于NULL,继续分析路径
+	p  = path_parse(p, name);
+      }
+   }
+   return depth;
+}
+
+```
+
+<h3>
+文件系统初始化
+</h3>
+
+```c
+/* 在磁盘上搜索文件系统,若没有则格式化分区创建文件系统 */
+void filesys_init() {
+   uint8_t channel_no = 0, dev_no, part_idx = 0;
+
+   /* sb_buf用来存储从硬盘上读入的超级块 */
+   struct super_block* sb_buf = (struct super_block*)sys_malloc(SECTOR_SIZE);
+
+   if (sb_buf == NULL) {
+      PANIC("alloc memory failed!");
+   }
+   printk("searching filesystem......\n");
+   while (channel_no < channel_cnt) {
+      dev_no = 0;
+      while(dev_no < 2) {
+	 if (dev_no == 0) {   // 跨过裸盘hd60M.img
+	    dev_no++;
+	    continue;
+	 }
+	 struct disk* hd = &channels[channel_no].devices[dev_no];
+	 struct partition* part = hd->prim_parts;
+	 while(part_idx < 12) {   // 4个主分区+8个逻辑
+	    if (part_idx == 4) {  // 开始处理逻辑分区
+	       part = hd->logic_parts;
+	    }
+
+	 /* channels数组是全局变量,默认值为0,disk属于其嵌套结构,
+	  * partition又为disk的嵌套结构,因此partition中的成员默认也为0.
+	  * 若partition未初始化,则partition中的成员仍为0. 
+	  * 下面处理存在的分区. */
+	    if (part->sec_cnt != 0) {  // 如果分区存在
+	       memset(sb_buf, 0, SECTOR_SIZE);
+
+	       /* 读出分区的超级块,根据魔数是否正确来判断是否存在文件系统 */
+	       ide_read(hd, part->start_lba + 1, sb_buf, 1);   
+
+	       /* 只支持自己的文件系统.若磁盘上已经有文件系统就不再格式化了 */
+	       if (sb_buf->magic == 0x19590318) {
+		  printk("%s has filesystem\n", part->name);
+	       } else {			  // 其它文件系统不支持,一律按无文件系统处理
+		  printk("formatting %s`s partition %s......\n", hd->name, part->name);
+		  partition_format(part);
+	       }
+	    }
+	    part_idx++;
+	    part++;	// 下一分区
+	 }
+	 dev_no++;	// 下一磁盘
+      }
+      channel_no++;	// 下一通道
+   }
+   sys_free(sb_buf);
+
+   /* 确定默认操作的分区 */
+   char default_part[8] = "sdb1";
+   /* 挂载分区 */
+   list_traversal(&partition_list, mount_partition, (int)default_part);
+
+   /* 将当前分区的根目录打开 */
+   open_root_dir(cur_part);
+
+   /* 初始化文件表 */
+   uint32_t fd_idx = 0;
+   while (fd_idx < MAX_FILE_OPEN) {
+      file_table[fd_idx++].fd_inode = NULL;
+   }
+}
+```
+
+<h3>
+挂载文件系统
+</h3>
+
+挂载文件系统实质是把文件系统的信息载入内存，在内存中监视硬盘信息，有写操作发生时再把改动写入到硬盘里。
+
+```c
+/* 在分区链表中找到名为part_name的分区,并将其指针赋值给cur_part */
+static bool mount_partition(struct list_elem* pelem, int arg) {
+   char* part_name = (char*)arg;
+   struct partition* part = elem2entry(struct partition, part_tag, pelem);
+   if (!strcmp(part->name, part_name)) {
+      cur_part = part;
+      struct disk* hd = cur_part->my_disk;
+
+      /* sb_buf用来存储从硬盘上读入的超级块 */
+      struct super_block* sb_buf = (struct super_block*)sys_malloc(SECTOR_SIZE);
+
+      /* 在内存中创建分区cur_part的超级块 */
+      cur_part->sb = (struct super_block*)sys_malloc(sizeof(struct super_block));
+      if (cur_part->sb == NULL) {
+	 PANIC("alloc memory failed!");
+      }
+
+      /* 读入超级块 */
+      memset(sb_buf, 0, SECTOR_SIZE);
+      ide_read(hd, cur_part->start_lba + 1, sb_buf, 1);   
+
+      /* 把sb_buf中超级块的信息复制到分区的超级块sb中。*/
+      memcpy(cur_part->sb, sb_buf, sizeof(struct super_block)); 
+
+      /**********     将硬盘上的块位图读入到内存    ****************/
+      cur_part->block_bitmap.bits = (uint8_t*)sys_malloc(sb_buf->block_bitmap_sects * SECTOR_SIZE);
+      if (cur_part->block_bitmap.bits == NULL) {
+	 PANIC("alloc memory failed!");
+      }
+      cur_part->block_bitmap.btmp_bytes_len = sb_buf->block_bitmap_sects * SECTOR_SIZE;
+      /* 从硬盘上读入块位图到分区的block_bitmap.bits */
+      ide_read(hd, sb_buf->block_bitmap_lba, cur_part->block_bitmap.bits, sb_buf->block_bitmap_sects);   
+      /*************************************************************/
+
+      /**********     将硬盘上的inode位图读入到内存    ************/
+      cur_part->inode_bitmap.bits = (uint8_t*)sys_malloc(sb_buf->inode_bitmap_sects * SECTOR_SIZE);
+      if (cur_part->inode_bitmap.bits == NULL) {
+	 PANIC("alloc memory failed!");
+      }
+      cur_part->inode_bitmap.btmp_bytes_len = sb_buf->inode_bitmap_sects * SECTOR_SIZE;
+      /* 从硬盘上读入inode位图到分区的inode_bitmap.bits */
+      ide_read(hd, sb_buf->inode_bitmap_lba, cur_part->inode_bitmap.bits, sb_buf->inode_bitmap_sects);
+      /*************************************************************/
+
+      list_init(&cur_part->open_inodes);
+      printk("mount %s done!\n", part->name);
+
+   /* 此处返回true是为了迎合主调函数list_traversal的实现,与函数本身功能无关。
+      只有返回true时list_traversal才会停止遍历,减少了后面元素无意义的遍历.*/
+      return true;
+   }
+   return false;     // 使list_traversal继续遍历
+}
+```
+
+1. 函数 `mount_partition` 是 `list_traversal` 的回调函数,其接受两个参数,`pelem` 是 `list_traversal` 传给它的列表中的元素，在此处 `pelem` 是分区 `partition` 中的 `part_tag` 的地址。`arg` 是待比对的参数，此处是分区名。函数功能是在分区链表中找到名为 `part_name` 的分区，并将其指针赋值给`cur part`——用来记录默认操作的分区。
+2. `mount_partition` 中用 `sys_malloc` 分别分配内存给 `super_block`，`block_bitmap`，`inode_bitmap` 并在位图中记录长度，再用 `ide_read` 分别读入数据，最后初始化打开的 `inode` 链表。
+
+
+
+<h3>
+硬盘读写
+</h3>
+
+```c
+/* 从硬盘读取sec_cnt个扇区到buf */
+void ide_read(struct disk* hd, uint32_t lba, void* buf, uint32_t sec_cnt) {   // 此处的sec_cnt为32位大小
+   ASSERT(lba <= max_lba);
+   ASSERT(sec_cnt > 0);
+   lock_acquire (&hd->my_channel->lock);
+
+/* 1 先选择操作的硬盘 */
+   select_disk(hd);
+
+   uint32_t secs_op;		 // 每次操作的扇区数
+   uint32_t secs_done = 0;	 // 已完成的扇区数
+   while(secs_done < sec_cnt) {
+      if ((secs_done + 256) <= sec_cnt) {
+	 	secs_op = 256;
+      } else {
+	 	secs_op = sec_cnt - secs_done;
+      }
+
+   /* 2 写入待读入的扇区数和起始扇区号 */
+      select_sector(hd, lba + secs_done, secs_op);
+
+   /* 3 执行的命令写入reg_cmd寄存器 */
+      cmd_out(hd->my_channel, CMD_READ_SECTOR);	      // 准备开始读数据
+
+   /*********************   阻塞自己的时机  ***********************
+      在硬盘已经开始工作(开始在内部读数据或写数据)后才能阻塞自己,现在硬盘已经开始忙了,
+      将自己阻塞,等待硬盘完成读操作后通过中断处理程序唤醒自己*/
+      sema_down(&hd->my_channel->disk_done);
+   /*************************************************************/
+
+   /* 4 检测硬盘状态是否可读 */
+      /* 醒来后开始执行下面代码*/
+      if (!busy_wait(hd)) {			      // 若失败
+	 	char error[64];
+	 	sprintf(error, "%s read sector %d failed!!!!!!\n", hd->name, lba);
+	 	PANIC(error);
+      }
+
+   /* 5 把数据从硬盘的缓冲区中读出 */
+      read_from_sector(hd, (void*)((uint32_t)buf + secs_done * 512), secs_op);
+      secs_done += secs_op;
+   }
+   lock_release(&hd->my_channel->lock);
+}
+
+/* 将buf中sec_cnt扇区数据写入硬盘 */
+void ide_write(struct disk* hd, uint32_t lba, void* buf, uint32_t sec_cnt) {
+   ASSERT(lba <= max_lba);
+   ASSERT(sec_cnt > 0);
+   lock_acquire (&hd->my_channel->lock);
+
+/* 1 先选择操作的硬盘 */
+   select_disk(hd);
+
+   uint32_t secs_op;		 // 每次操作的扇区数
+   uint32_t secs_done = 0;	 // 已完成的扇区数
+   while(secs_done < sec_cnt) {
+      if ((secs_done + 256) <= sec_cnt) {
+	 secs_op = 256;
+      } else {
+	 secs_op = sec_cnt - secs_done;
+      }
+
+   /* 2 写入待写入的扇区数和起始扇区号 */
+      select_sector(hd, lba + secs_done, secs_op);		      // 先将待读的块号lba地址和待读入的扇区数写入lba寄存器
+
+   /* 3 执行的命令写入reg_cmd寄存器 */
+      cmd_out(hd->my_channel, CMD_WRITE_SECTOR);	      // 准备开始写数据
+
+   /* 4 检测硬盘状态是否可读 */
+      if (!busy_wait(hd)) {			      // 若失败
+	 char error[64];
+	 sprintf(error, "%s write sector %d failed!!!!!!\n", hd->name, lba);
+	 PANIC(error);
+      }
+
+   /* 5 将数据写入硬盘 */
+      write2sector(hd, (void*)((uint32_t)buf + secs_done * 512), secs_op);
+
+      /* 在硬盘响应期间阻塞自己 */
+      sema_down(&hd->my_channel->disk_done);
+      secs_done += secs_op;
+   }
+   /* 醒来后开始释放锁*/
+   lock_release(&hd->my_channel->lock);
+}
+```
+
+```c
+/* 将buf中sec_cnt扇区的数据写入硬盘 */
+static void write2sector(struct disk* hd, void* buf, uint8_t sec_cnt) {
+   uint32_t size_in_byte;
+   if (sec_cnt == 0) {
+   /* 因为sec_cnt是8位变量,由主调函数将其赋值时,若为256则会将最高位的1丢掉变为0 */
+      size_in_byte = 256 * 512;
+   } else { 
+      size_in_byte = sec_cnt * 512; 
+   }
+   outsw(reg_data(hd->my_channel), buf, size_in_byte / 2);
+}
+
+/* 硬盘读入sec_cnt个扇区的数据到buf */
+static void read_from_sector(struct disk* hd, void* buf, uint8_t sec_cnt) {
+   uint32_t size_in_byte;
+   if (sec_cnt == 0) {
+   /* 因为sec_cnt是8位变量,由主调函数将其赋值时,若为256则会将最高位的1丢掉变为0 */
+      size_in_byte = 256 * 512;
+   } else {
+      size_in_byte = sec_cnt * 512; 
+   }
+   insw(reg_data(hd->my_channel), buf, size_in_byte / 2);
+}
+```
+
+```c
+/* 向端口port写入一个字节*/
+static inline void outb(uint16_t port, uint8_t data) {
+/*********************************************************
+ a表示用寄存器al或ax或eax,对端口指定N表示0~255, d表示用dx存储端口号,
+ %b0表示对应al,%w1表示对应dx */
+   asm volatile ( "outb %b0, %w1" : : "a" (data), "Nd" (port));
+/******************************************************/
+}
+
+/* 将addr处起始的word_cnt个字写入端口port */
+static inline void outsw(uint16_t port, const void* addr, uint32_t word_cnt) {
+/*********************************************************
+   +表示此限制即做输入又做输出.
+   outsw是把ds:esi处的16位的内容写入port端口, 我们在设置段描述符时, 
+   已经将ds,es,ss段的选择子都设置为相同的值了,此时不用担心数据错乱。*/
+   asm volatile ("cld; rep outsw" : "+S" (addr), "+c" (word_cnt) : "d" (port));
+/******************************************************/
+}
+
+/* 将从端口port读入的一个字节返回 */
+static inline uint8_t inb(uint16_t port) {
+   uint8_t data;
+   asm volatile ("inb %w1, %b0" : "=a" (data) : "Nd" (port));
+   return data;
+}
+
+/* 将从端口port读入的word_cnt个字写入addr */
+static inline void insw(uint16_t port, void* addr, uint32_t word_cnt) {
+/******************************************************
+   insw是将从端口port处读入的16位内容写入es:edi指向的内存,
+   我们在设置段描述符时, 已经将ds,es,ss段的选择子都设置为相同的值了,
+   此时不用担心数据错乱。*/
+   asm volatile ("cld; rep insw" : "+D" (addr), "+c" (word_cnt) : "d" (port) : "memory");
+/******************************************************/
+}
+```
+
+<h2>
+文件操作
+</h2>
+
+<h3>
+文件描述符
+</h3>
+
+文件结构用于描述文件被打开后文件读写偏移量等信息，每个文件可以被多次打开，因此每个 `inode` 可以对应多个文件结构（在进程结构体中限制了打开文件的数目）。linux把所有文件结构放在一起，用一个数组——文件表来管理。
+
+linux通过文件描述符寻找对应数据块的过程分为三步：
+1. 用文件描述符在PCB文件描述符数组中获取文件结构的下标。
+2. 用该下标在文件表中索引文件结构，获取对应 `inode`。
+3. 若 `inode` 在 `inode` 队列中不存在，linux会把 `inode` 从硬盘中把它加载到 `inode` 队列，并使文件结构中的 `fd_inode` 指向它。
+
+```c
+/* 文件结构 */
+struct file {
+   uint32_t fd_pos;      // 记录当前文件操作的偏移地址,以0为起始,最大为文件大小-1
+   uint32_t fd_flag;
+   struct inode* fd_inode;
+};
+
+/* 标准输入输出描述符 */
+enum std_fd {
+   stdin_no,   // 0 标准输入
+   stdout_no,  // 1 标准输出
+   stderr_no   // 2 标准错误
+};
+
+/* 位图类型 */
+enum bitmap_type {
+   INODE_BITMAP,     // inode位图
+   BLOCK_BITMAP	     // 块位图
+};
+```
+
+<h3>
+inode操作基础
+</h3>
+
+```c
+/* 用来存储inode位置 */
+struct inode_position {
+   bool	 two_sec;	// inode是否跨扇区
+   uint32_t sec_lba;	// inode所在的扇区号
+   uint32_t off_size;	// inode在扇区内的字节偏移量
+};
+
+/* 获取inode所在的扇区和扇区内的偏移量 */
+static void inode_locate(struct partition* part, uint32_t inode_no, struct inode_position* inode_pos) {
+   /* inode_table在硬盘上是连续的 */
+   ASSERT(inode_no < 4096);
+   uint32_t inode_table_lba = part->sb->inode_table_lba;
+
+   uint32_t inode_size = sizeof(struct inode);
+   uint32_t off_size = inode_no * inode_size;	    // 第inode_no号I结点相对于inode_table_lba的字节偏移量
+   uint32_t off_sec  = off_size / 512;		    // 第inode_no号I结点相对于inode_table_lba的扇区偏移量
+   uint32_t off_size_in_sec = off_size % 512;	    // 待查找的inode所在扇区中的起始地址
+
+   /* 判断此i结点是否跨越2个扇区 */
+   uint32_t left_in_sec = 512 - off_size_in_sec;
+   if (left_in_sec < inode_size ) {	  // 若扇区内剩下的空间不足以容纳一个inode,必然是I结点跨越了2个扇区
+      inode_pos->two_sec = true;
+   } else {				  // 否则,所查找的inode未跨扇区
+      inode_pos->two_sec = false;
+   }
+   inode_pos->sec_lba = inode_table_lba + off_sec;
+   inode_pos->off_size = off_size_in_sec;
+}
+
+/* 将inode写入到分区part */
+void inode_sync(struct partition* part, struct inode* inode, void* io_buf) {	 // io_buf是用于硬盘io的缓冲区
+   uint8_t inode_no = inode->i_no;
+   struct inode_position inode_pos;
+   inode_locate(part, inode_no, &inode_pos);	       // inode位置信息会存入inode_pos
+   ASSERT(inode_pos.sec_lba <= (part->start_lba + part->sec_cnt));
+
+   /* 硬盘中的inode中的成员inode_tag和i_open_cnts是不需要的,
+    * 它们只在内存中记录链表位置和被多少进程共享 */
+   struct inode pure_inode;
+   memcpy(&pure_inode, inode, sizeof(struct inode));
+
+   /* 以下inode的三个成员只存在于内存中,现在将inode同步到硬盘,清掉这三项即可 */
+   pure_inode.i_open_cnts = 0;
+   pure_inode.write_deny = false;	 // 置为false,以保证在硬盘中读出时为可写
+   pure_inode.inode_tag.prev = pure_inode.inode_tag.next = NULL;
+
+   char* inode_buf = (char*)io_buf;
+   if (inode_pos.two_sec) {	    // 若是跨了两个扇区,就要读出两个扇区再写入两个扇区
+   /* 读写硬盘是以扇区为单位,若写入的数据小于一扇区,要将原硬盘上的内容先读出来再和新数据拼成一扇区后再写入  */
+      ide_read(part->my_disk, inode_pos.sec_lba, inode_buf, 2);	// inode在format中写入硬盘时是连续写入的,所以读入2块扇区
+
+   /* 开始将待写入的inode拼入到这2个扇区中的相应位置 */
+      memcpy((inode_buf + inode_pos.off_size), &pure_inode, sizeof(struct inode));
+
+   /* 将拼接好的数据再写入磁盘 */
+      ide_write(part->my_disk, inode_pos.sec_lba, inode_buf, 2);
+   } else {			    // 若只是一个扇区
+      ide_read(part->my_disk, inode_pos.sec_lba, inode_buf, 1);
+      memcpy((inode_buf + inode_pos.off_size), &pure_inode, sizeof(struct inode));
+      ide_write(part->my_disk, inode_pos.sec_lba, inode_buf, 1);
+   }
+}
+
+/* 根据i结点号返回相应的i结点 */
+struct inode* inode_open(struct partition* part, uint32_t inode_no) {
+   /* 先在已打开inode链表中找inode,此链表是为提速创建的缓冲区 */
+   struct list_elem* elem = part->open_inodes.head.next;
+   struct inode* inode_found;
+   while (elem != &part->open_inodes.tail) {
+      inode_found = elem2entry(struct inode, inode_tag, elem);
+      if (inode_found->i_no == inode_no) {
+	 inode_found->i_open_cnts++;
+	 return inode_found;
+      }
+      elem = elem->next;
+   }
+
+   /*由于open_inodes链表中找不到,下面从硬盘上读入此inode并加入到此链表 */
+   struct inode_position inode_pos;
+
+   /* inode位置信息会存入inode_pos, 包括inode所在扇区地址和扇区内的字节偏移量 */
+   inode_locate(part, inode_no, &inode_pos);
+
+/* 为使通过sys_malloc创建的新inode被所有任务共享,
+ * 需要将inode置于内核空间,故需要临时
+ * 将cur_pbc->pgdir置为NULL */
+   struct task_struct* cur = running_thread();
+   uint32_t* cur_pagedir_bak = cur->pgdir;
+   cur->pgdir = NULL;
+   /* 以上三行代码完成后下面分配的内存将位于内核区 */
+   inode_found = (struct inode*)sys_malloc(sizeof(struct inode));
+   /* 恢复pgdir */
+   cur->pgdir = cur_pagedir_bak;
+
+   char* inode_buf;
+   if (inode_pos.two_sec) {	// 考虑跨扇区的情况
+      inode_buf = (char*)sys_malloc(1024);
+
+   /* i结点表是被partition_format函数连续写入扇区的,
+    * 所以下面可以连续读出来 */
+      ide_read(part->my_disk, inode_pos.sec_lba, inode_buf, 2);
+   } else {	// 否则,所查找的inode未跨扇区,一个扇区大小的缓冲区足够
+      inode_buf = (char*)sys_malloc(512);
+      ide_read(part->my_disk, inode_pos.sec_lba, inode_buf, 1);
+   }
+   memcpy(inode_found, inode_buf + inode_pos.off_size, sizeof(struct inode));
+
+   /* 因为一会很可能要用到此inode,故将其插入到队首便于提前检索到 */
+   list_push(&part->open_inodes, &inode_found->inode_tag);
+   inode_found->i_open_cnts = 1;
+
+   sys_free(inode_buf);
+   return inode_found;
+}
+
+/* 关闭inode或减少inode的打开数 */
+void inode_close(struct inode* inode) {
+   /* 若没有进程再打开此文件,将此inode去掉并释放空间 */
+   enum intr_status old_status = intr_disable();
+   if (--inode->i_open_cnts == 0) {
+      list_remove(&inode->inode_tag);	  // 将I结点从part->open_inodes中去掉
+
+   /* inode_open时为实现inode被所有进程共享,已经在sys_malloc为inode分配了内核空间 */
+      struct task_struct* cur = running_thread();
+      uint32_t* cur_pagedir_bak = cur->pgdir;
+      cur->pgdir = NULL;
+      sys_free(inode);		         // 释放inode的内核空间
+      cur->pgdir = cur_pagedir_bak;
+   }
+   intr_set_status(old_status);
+}
+
+
+/* 初始化new_inode */
+void inode_init(uint32_t inode_no, struct inode* new_inode) {
+   new_inode->i_no = inode_no;
+   new_inode->i_size = 0;
+   new_inode->i_open_cnts = 0;
+   new_inode->write_deny = false;
+
+   /* 初始化块索引数组i_sector */
+   uint8_t sec_idx = 0;
+   while (sec_idx < 13) {
+   /* i_sectors[12]为一级间接块地址 */
+      new_inode->i_sectors[sec_idx] = 0;
+      sec_idx++;
+   }
+}
+
+```
+
+<h3>
+文件操作基础
+</h3>
+
+```c
+/* 文件表 */
+struct file file_table[MAX_FILE_OPEN];
+
+/* 从文件表file_table中获取一个空闲位,成功返回下标,失败返回-1 */
+int32_t get_free_slot_in_global(void) {
+   uint32_t fd_idx = 3;
+   while (fd_idx < MAX_FILE_OPEN) {
+      if (file_table[fd_idx].fd_inode == NULL) {
+	 	break;
+      }
+      fd_idx++;
+   }
+   if (fd_idx == MAX_FILE_OPEN) {
+      printk("exceed max open files\n");
+      return -1;
+   }
+   return fd_idx;
+}
+
+/* 将全局描述符下标安装到进程或线程自己的文件描述符数组fd_table中,
+ * 成功返回下标,失败返回-1 */
+int32_t pcb_fd_install(int32_t globa_fd_idx) {
+   struct task_struct* cur = running_thread();
+   uint8_t local_fd_idx = 3; // 跨过stdin,stdout,stderr
+   while (local_fd_idx < MAX_FILES_OPEN_PER_PROC) {
+      if (cur->fd_table[local_fd_idx] == -1) {	// -1表示free_slot,可用
+	 cur->fd_table[local_fd_idx] = globa_fd_idx;
+	 break;
+      }
+      local_fd_idx++;
+   }
+   if (local_fd_idx == MAX_FILES_OPEN_PER_PROC) {
+      printk("exceed max open files_per_proc\n");
+      return -1;
+   }
+   return local_fd_idx;
+}
+
+/* 分配一个i结点,返回i结点号 */
+int32_t inode_bitmap_alloc(struct partition* part) {
+   int32_t bit_idx = bitmap_scan(&part->inode_bitmap, 1);
+   if (bit_idx == -1) {
+      return -1;
+   }
+   bitmap_set(&part->inode_bitmap, bit_idx, 1);
+   return bit_idx;
+}
+
+/* 分配1个扇区,返回其扇区地址 */
+int32_t block_bitmap_alloc(struct partition* part) {
+   int32_t bit_idx = bitmap_scan(&part->block_bitmap, 1);
+   if (bit_idx == -1) {
+      return -1;
+   }
+   bitmap_set(&part->block_bitmap, bit_idx, 1);
+   /* 和inode_bitmap_malloc不同,此处返回的不是位图索引,而是具体可用的扇区地址 */
+   return (part->sb->data_start_lba + bit_idx);
+}
+
+/* 将内存中bitmap第bit_idx位所在的512字节同步到硬盘 */
+void bitmap_sync(struct partition* part, uint32_t bit_idx, uint8_t btmp_type) {
+   uint32_t off_sec = bit_idx / 4096;  // 本i结点索引相对于位图的扇区偏移量
+   uint32_t off_size = off_sec * BLOCK_SIZE;  // 本i结点索引相对于位图的字节偏移量
+   uint32_t sec_lba;
+   uint8_t* bitmap_off;
+
+/* 需要被同步到硬盘的位图只有inode_bitmap和block_bitmap */
+   switch (btmp_type) {
+      case INODE_BITMAP:
+	 sec_lba = part->sb->inode_bitmap_lba + off_sec;
+	 bitmap_off = part->inode_bitmap.bits + off_size;
+	 break;
+
+      case BLOCK_BITMAP:
+	 sec_lba = part->sb->block_bitmap_lba + off_sec;
+	 bitmap_off = part->block_bitmap.bits + off_size;
+	 break;
+   }
+   ide_write(part->my_disk, sec_lba, bitmap_off, 1);
+}
+
+```
+
+<h3>
+路径解析与文件搜索
+</h3>
+
+```c
+/* 将最上层路径名称解析出来 */
+char* path_parse(char* pathname, char* name_store) {
+   if (pathname[0] == '/') {   // 根目录不需要单独解析
+    /* 路径中出现1个或多个连续的字符'/',将这些'/'跳过,如"///a/b" */
+       while(*(++pathname) == '/');
+   }
+
+   /* 开始一般的路径解析 */
+   while (*pathname != '/' && *pathname != 0) {
+      *name_store++ = *pathname++;
+   }
+
+   if (pathname[0] == 0) {   // 若路径字符串为空则返回NULL
+      return NULL;
+   }
+   return pathname; 
+}
+
+/* 返回路径深度,比如/a/b/c,深度为3 */
+int32_t path_depth_cnt(char* pathname) {
+   ASSERT(pathname != NULL);
+   char* p = pathname;
+   char name[MAX_FILE_NAME_LEN];       // 用于path_parse的参数做路径解析
+   uint32_t depth = 0;
+
+   /* 解析路径,从中拆分出各级名称 */
+   p = path_parse(p, name);
+   while (name[0]) {
+      depth++;
+      memset(name, 0, MAX_FILE_NAME_LEN);
+      if (p) {	     // 如果p不等于NULL,继续分析路径
+	p  = path_parse(p, name);
+      }
+   }
+   return depth;
+}
+```
+
+
+
+```c
+/* 搜索文件pathname,若找到则返回其inode号,否则返回-1 */
+static int search_file(const char* pathname, struct path_search_record* searched_record) {
+   /* 如果待查找的是根目录,为避免下面无用的查找,直接返回已知根目录信息 */
+   if (!strcmp(pathname, "/") || !strcmp(pathname, "/.") || !strcmp(pathname, "/..")) {
+      searched_record->parent_dir = &root_dir;
+      searched_record->file_type = FT_DIRECTORY;
+      searched_record->searched_path[0] = 0;	   // 搜索路径置空
+      return 0;
+   }
+
+   uint32_t path_len = strlen(pathname);
+   /* 保证pathname至少是这样的路径/x且小于最大长度 */
+   ASSERT(pathname[0] == '/' && path_len > 1 && path_len < MAX_PATH_LEN);
+   char* sub_path = (char*)pathname;
+   struct dir* parent_dir = &root_dir;
+   struct dir_entry dir_e;
+
+   /* 记录路径解析出来的各级名称,如路径"/a/b/c",
+    * 数组name每次的值分别是"a","b","c" */
+   char name[MAX_FILE_NAME_LEN] = {0};
+
+   searched_record->parent_dir = parent_dir;
+   searched_record->file_type = FT_UNKNOWN;
+   uint32_t parent_inode_no = 0;  // 父目录的inode号
+
+   sub_path = path_parse(sub_path, name);
+   while (name[0]) {	   // 若第一个字符就是结束符,结束循环
+      /* 记录查找过的路径,但不能超过searched_path的长度512字节 */
+      ASSERT(strlen(searched_record->searched_path) < 512);
+
+      /* 记录已存在的父目录 */
+      strcat(searched_record->searched_path, "/");
+      strcat(searched_record->searched_path, name);
+
+      /* 在所给的目录中查找文件 */
+      if (search_dir_entry(cur_part, parent_dir, name, &dir_e)) {
+	 memset(name, 0, MAX_FILE_NAME_LEN);
+	 /* 若sub_path不等于NULL,也就是未结束时继续拆分路径 */
+	 if (sub_path) {
+	    sub_path = path_parse(sub_path, name);
+	 }
+
+	 if (FT_DIRECTORY == dir_e.f_type) {   // 如果被打开的是目录
+	    parent_inode_no = parent_dir->inode->i_no;
+	    dir_close(parent_dir);
+	    parent_dir = dir_open(cur_part, dir_e.i_no); // 更新父目录
+	    searched_record->parent_dir = parent_dir;
+	    continue;
+	 } else if (FT_REGULAR == dir_e.f_type) {	 // 若是普通文件
+	    searched_record->file_type = FT_REGULAR;
+	    return dir_e.i_no;
+	 }
+      } else {		   //若找不到,则返回-1
+	 /* 找不到目录项时,要留着parent_dir不要关闭,
+	  * 若是创建新文件的话需要在parent_dir中创建 */
+	 return -1;
+      }
+   }
+
+   /* 执行到此,必然是遍历了完整路径并且查找的文件或目录只有同名目录存在 */
+   dir_close(searched_record->parent_dir);
+
+   /* 保存被查找目录的直接父目录 */
+   searched_record->parent_dir = dir_open(cur_part, parent_inode_no);
+   searched_record->file_type = FT_DIRECTORY;
+   return dir_e.i_no;
+}
+```
+
+
+<h3>
+目录操作基础
+</h3>
+
+```c
+struct dir root_dir;             // 根目录
+
+/* 打开根目录 */
+void open_root_dir(struct partition* part) {
+   root_dir.inode = inode_open(part, part->sb->root_inode_no);
+   root_dir.dir_pos = 0;
+}
+
+/* 在分区part上打开i结点为inode_no的目录并返回目录指针 */
+struct dir* dir_open(struct partition* part, uint32_t inode_no) {
+   struct dir* pdir = (struct dir*)sys_malloc(sizeof(struct dir));
+   pdir->inode = inode_open(part, inode_no);
+   pdir->dir_pos = 0;
+   return pdir;
+}
+
+/* 在part分区内的pdir目录内寻找名为name的文件或目录,
+ * 找到后返回true并将其目录项存入dir_e,否则返回false */
+bool search_dir_entry(struct partition* part, struct dir* pdir, \
+		     const char* name, struct dir_entry* dir_e) {
+   uint32_t block_cnt = 140;	 // 12个直接块+128个一级间接块=140块
+
+   /* 12个直接块大小+128个间接块,共560字节 */
+   uint32_t* all_blocks = (uint32_t*)sys_malloc(48 + 512);
+   if (all_blocks == NULL) {
+      printk("search_dir_entry: sys_malloc for all_blocks failed");
+      return false;
+   }
+
+   uint32_t block_idx = 0;
+   while (block_idx < 12) {
+      all_blocks[block_idx] = pdir->inode->i_sectors[block_idx];
+      block_idx++;
+   }
+   block_idx = 0;
+
+   if (pdir->inode->i_sectors[12] != 0) {	// 若含有一级间接块表
+      ide_read(part->my_disk, pdir->inode->i_sectors[12], all_blocks + 12, 1);
+   }
+/* 至此,all_blocks存储的是该文件或目录的所有扇区地址 */
+
+   /* 写目录项的时候已保证目录项不跨扇区,
+    * 这样读目录项时容易处理, 只申请容纳1个扇区的内存 */
+   uint8_t* buf = (uint8_t*)sys_malloc(SECTOR_SIZE);
+   struct dir_entry* p_de = (struct dir_entry*)buf;	    // p_de为指向目录项的指针,值为buf起始地址
+   uint32_t dir_entry_size = part->sb->dir_entry_size;
+   uint32_t dir_entry_cnt = SECTOR_SIZE / dir_entry_size;   // 1扇区内可容纳的目录项个数
+
+   /* 开始在所有块中查找目录项 */
+   while (block_idx < block_cnt) {
+   /* 块地址为0时表示该块中无数据,继续在其它块中找 */
+      if (all_blocks[block_idx] == 0) {
+	 block_idx++;
+	 continue;
+      }
+      ide_read(part->my_disk, all_blocks[block_idx], buf, 1);
+
+      uint32_t dir_entry_idx = 0;
+      /* 遍历扇区中所有目录项 */
+      while (dir_entry_idx < dir_entry_cnt) {
+	 /* 若找到了,就直接复制整个目录项 */
+	 if (!strcmp(p_de->filename, name)) {
+	    memcpy(dir_e, p_de, dir_entry_size);
+	    sys_free(buf);
+	    sys_free(all_blocks);
+	    return true;
+	 }
+	 dir_entry_idx++;
+	 p_de++;
+      }
+      block_idx++;
+      p_de = (struct dir_entry*)buf;  // 此时p_de已经指向扇区内最后一个完整目录项了,需要恢复p_de指向为buf
+      memset(buf, 0, SECTOR_SIZE);	  // 将buf清0,下次再用
+   }
+   sys_free(buf);
+   sys_free(all_blocks);
+   return false;
+}
+
+```
+
+<h3>
+文件创建，打开与写入
+</h3>
+
+<h4>
+创建
+</h4>
+
+```c
+/* 创建文件,若成功则返回文件描述符,否则返回-1 */
+int32_t file_create(struct dir* parent_dir, char* filename, uint8_t flag) {
+   /* 后续操作的公共缓冲区 */
+   void* io_buf = sys_malloc(1024);
+   if (io_buf == NULL) {
+      printk("in file_creat: sys_malloc for io_buf failed\n");
+      return -1;
+   }
+
+   uint8_t rollback_step = 0;	       // 用于操作失败时回滚各资源状态
+
+   /* 为新文件分配inode */
+   int32_t inode_no = inode_bitmap_alloc(cur_part); 
+   if (inode_no == -1) {
+      printk("in file_creat: allocate inode failed\n");
+      return -1;
+   }
+
+/* 此inode要从堆中申请内存,不可生成局部变量(函数退出时会释放)
+ * 因为file_table数组中的文件描述符的inode指针要指向它.*/
+   struct inode* new_file_inode = (struct inode*)sys_malloc(sizeof(struct inode)); 
+   if (new_file_inode == NULL) {
+      printk("file_create: sys_malloc for inode failded\n");
+      rollback_step = 1;
+      goto rollback;
+   }
+   inode_init(inode_no, new_file_inode);	    // 初始化i结点
+
+   /* 返回的是file_table数组的下标 */
+   int fd_idx = get_free_slot_in_global();
+   if (fd_idx == -1) {
+      printk("exceed max open files\n");
+      rollback_step = 2;
+      goto rollback;
+   }
+
+   file_table[fd_idx].fd_inode = new_file_inode;
+   file_table[fd_idx].fd_pos = 0;
+   file_table[fd_idx].fd_flag = flag;
+   file_table[fd_idx].fd_inode->write_deny = false;
+
+   struct dir_entry new_dir_entry;
+   memset(&new_dir_entry, 0, sizeof(struct dir_entry));
+
+   create_dir_entry(filename, inode_no, FT_REGULAR, &new_dir_entry);	// create_dir_entry只是内存操作不出意外,不会返回失败
+
+/* 同步内存数据到硬盘 */
+   /* a 在目录parent_dir下安装目录项new_dir_entry, 写入硬盘后返回true,否则false */
+   if (!sync_dir_entry(parent_dir, &new_dir_entry, io_buf)) {
+      printk("sync dir_entry to disk failed\n");
+      rollback_step = 3;
+      goto rollback;
+   }
+
+   memset(io_buf, 0, 1024);
+   /* b 将父目录i结点的内容同步到硬盘 */
+   inode_sync(cur_part, parent_dir->inode, io_buf);
+
+   memset(io_buf, 0, 1024);
+   /* c 将新创建文件的i结点内容同步到硬盘 */
+   inode_sync(cur_part, new_file_inode, io_buf);
+
+   /* d 将inode_bitmap位图同步到硬盘 */
+   bitmap_sync(cur_part, inode_no, INODE_BITMAP);
+
+   /* e 将创建的文件i结点添加到open_inodes链表 */
+   list_push(&cur_part->open_inodes, &new_file_inode->inode_tag);
+   new_file_inode->i_open_cnts = 1;
+
+   sys_free(io_buf);
+   return pcb_fd_install(fd_idx);
+
+/*创建文件需要创建相关的多个资源,若某步失败则会执行到下面的回滚步骤 */
+rollback:
+   switch (rollback_step) {
+      case 3:
+	 /* 失败时,将file_table中的相应位清空 */
+	 memset(&file_table[fd_idx], 0, sizeof(struct file)); 
+      case 2:
+	 sys_free(new_file_inode);
+      case 1:
+	 /* 如果新文件的i结点创建失败,之前位图中分配的inode_no也要恢复 */
+	 bitmap_set(&cur_part->inode_bitmap, inode_no, 0);
+	 break;
+   }
+   sys_free(io_buf);
+   return -1;
+}
+```
+
+<h4>
+打开
+</h4>
+
+```c
+/* 打开编号为inode_no的inode对应的文件,若成功则返回文件描述符,否则返回-1 */
+int32_t file_open(uint32_t inode_no, uint8_t flag) {
+   int fd_idx = get_free_slot_in_global();
+   if (fd_idx == -1) {
+      printk("exceed max open files\n");
+      return -1;
+   }
+   file_table[fd_idx].fd_inode = inode_open(cur_part, inode_no);
+   file_table[fd_idx].fd_pos = 0;	     // 每次打开文件,要将fd_pos还原为0,即让文件内的指针指向开头
+   file_table[fd_idx].fd_flag = flag;
+   bool* write_deny = &file_table[fd_idx].fd_inode->write_deny; 
+
+   if (flag == O_WRONLY || flag == O_RDWR) {	// 只要是关于写文件,判断是否有其它进程正写此文件
+						// 若是读文件,不考虑write_deny
+   /* 以下进入临界区前先关中断 */
+      enum intr_status old_status = intr_disable();
+      if (!(*write_deny)) {    // 若当前没有其它进程写该文件,将其占用.
+	 *write_deny = true;   // 置为true,避免多个进程同时写此文件
+	 intr_set_status(old_status);	  // 恢复中断
+      } else {		// 直接失败返回
+	 intr_set_status(old_status);
+	 printk("file can`t be write now, try again later\n");
+	 return -1;
+      }
+   }  // 若是读文件或创建文件,不用理会write_deny,保持默认
+   return pcb_fd_install(fd_idx);
+}
+
+/* 关闭文件 */
+int32_t file_close(struct file* file) {
+   if (file == NULL) {
+      return -1;
+   }
+   file->fd_inode->write_deny = false;
+   inode_close(file->fd_inode);
+   file->fd_inode = NULL;   // 使文件结构可用
+   return 0;
+}
+```
+
+<h4>
+写入
+</h4>
+
+```c
+/* 把buf中的count个字节写入file,成功则返回写入的字节数,失败则返回-1 */
+int32_t file_write(struct file* file, const void* buf, uint32_t count) {
+   if ((file->fd_inode->i_size + count) > (BLOCK_SIZE * 140))	{   // 文件目前最大只支持512*140=71680字节
+      printk("exceed max file_size 71680 bytes, write file failed\n");
+      return -1;
+   }
+   uint8_t* io_buf = sys_malloc(BLOCK_SIZE);
+   if (io_buf == NULL) {
+      printk("file_write: sys_malloc for io_buf failed\n");
+      return -1;
+   }
+   uint32_t* all_blocks = (uint32_t*)sys_malloc(BLOCK_SIZE + 48);	  // 用来记录文件所有的块地址
+   if (all_blocks == NULL) {
+      printk("file_write: sys_malloc for all_blocks failed\n");
+      return -1;
+   }
+
+   const uint8_t* src = buf;        // 用src指向buf中待写入的数据 
+   uint32_t bytes_written = 0;	    // 用来记录已写入数据大小
+   uint32_t size_left = count;	    // 用来记录未写入数据大小
+   int32_t block_lba = -1;	    // 块地址
+   uint32_t block_bitmap_idx = 0;   // 用来记录block对应于block_bitmap中的索引,做为参数传给bitmap_sync
+   uint32_t sec_idx;	      // 用来索引扇区
+   uint32_t sec_lba;	      // 扇区地址
+   uint32_t sec_off_bytes;    // 扇区内字节偏移量
+   uint32_t sec_left_bytes;   // 扇区内剩余字节量
+   uint32_t chunk_size;	      // 每次写入硬盘的数据块大小
+   int32_t indirect_block_table;      // 用来获取一级间接表地址
+   uint32_t block_idx;		      // 块索引
+
+   /* 判断文件是否是第一次写,如果是,先为其分配一个块 */
+   if (file->fd_inode->i_sectors[0] == 0) {
+      block_lba = block_bitmap_alloc(cur_part);
+      if (block_lba == -1) {
+	 printk("file_write: block_bitmap_alloc failed\n");
+	 return -1;
+      }
+      file->fd_inode->i_sectors[0] = block_lba;
+
+      /* 每分配一个块就将位图同步到硬盘 */
+      block_bitmap_idx = block_lba - cur_part->sb->data_start_lba;
+      ASSERT(block_bitmap_idx != 0);
+      bitmap_sync(cur_part, block_bitmap_idx, BLOCK_BITMAP);
+   }
+
+   /* 写入count个字节前,该文件已经占用的块数 */
+   uint32_t file_has_used_blocks = file->fd_inode->i_size / BLOCK_SIZE + 1;
+
+   /* 存储count字节后该文件将占用的块数 */
+   uint32_t file_will_use_blocks = (file->fd_inode->i_size + count) / BLOCK_SIZE + 1;
+   ASSERT(file_will_use_blocks <= 140);
+
+   /* 通过此增量判断是否需要分配扇区,如增量为0,表示原扇区够用 */
+   uint32_t add_blocks = file_will_use_blocks - file_has_used_blocks;
+
+/* 将写文件所用到的块地址收集到all_blocks,(系统中块大小等于扇区大小)
+ * 后面都统一在all_blocks中获取写入扇区地址 */
+   if (add_blocks == 0) { 
+   /* 在同一扇区内写入数据,不涉及到分配新扇区 */
+      if (file_has_used_blocks <= 12 ) {	// 文件数据量将在12块之内
+	 block_idx = file_has_used_blocks - 1;  // 指向最后一个已有数据的扇区
+	 all_blocks[block_idx] = file->fd_inode->i_sectors[block_idx];
+      } else { 
+      /* 未写入新数据之前已经占用了间接块,需要将间接块地址读进来 */
+	 ASSERT(file->fd_inode->i_sectors[12] != 0);
+         indirect_block_table = file->fd_inode->i_sectors[12];
+	 ide_read(cur_part->my_disk, indirect_block_table, all_blocks + 12, 1);
+      }
+   } else {
+   /* 若有增量,便涉及到分配新扇区及是否分配一级间接块表,下面要分三种情况处理 */
+   /* 第一种情况:12个直接块够用*/
+      if (file_will_use_blocks <= 12 ) {
+      /* 先将有剩余空间的可继续用的扇区地址写入all_blocks */
+	 block_idx = file_has_used_blocks - 1;
+	 ASSERT(file->fd_inode->i_sectors[block_idx] != 0);
+	 all_blocks[block_idx] = file->fd_inode->i_sectors[block_idx];
+
+      /* 再将未来要用的扇区分配好后写入all_blocks */
+	 block_idx = file_has_used_blocks;      // 指向第一个要分配的新扇区
+	 while (block_idx < file_will_use_blocks) {
+	    block_lba = block_bitmap_alloc(cur_part);
+	    if (block_lba == -1) {
+	       printk("file_write: block_bitmap_alloc for situation 1 failed\n");
+	       return -1;
+	    }
+
+      /* 写文件时,不应该存在块未使用但已经分配扇区的情况,当文件删除时,就会把块地址清0 */
+	    ASSERT(file->fd_inode->i_sectors[block_idx] == 0);     // 确保尚未分配扇区地址
+	    file->fd_inode->i_sectors[block_idx] = all_blocks[block_idx] = block_lba;
+
+	    /* 每分配一个块就将位图同步到硬盘 */
+	    block_bitmap_idx = block_lba - cur_part->sb->data_start_lba;
+	    bitmap_sync(cur_part, block_bitmap_idx, BLOCK_BITMAP);
+
+	    block_idx++;   // 下一个分配的新扇区
+	 }
+      } else if (file_has_used_blocks <= 12 && file_will_use_blocks > 12) { 
+	 /* 第二种情况: 旧数据在12个直接块内,新数据将使用间接块*/
+
+      /* 先将有剩余空间的可继续用的扇区地址收集到all_blocks */
+	 block_idx = file_has_used_blocks - 1;      // 指向旧数据所在的最后一个扇区
+	 all_blocks[block_idx] = file->fd_inode->i_sectors[block_idx];
+
+	 /* 创建一级间接块表 */
+	 block_lba = block_bitmap_alloc(cur_part);
+	 if (block_lba == -1) {
+	    printk("file_write: block_bitmap_alloc for situation 2 failed\n");
+	    return -1;
+	 }
+
+	 ASSERT(file->fd_inode->i_sectors[12] == 0);  // 确保一级间接块表未分配
+	 /* 分配一级间接块索引表 */
+	 indirect_block_table = file->fd_inode->i_sectors[12] = block_lba;
+
+	 block_idx = file_has_used_blocks;	// 第一个未使用的块,即本文件最后一个已经使用的直接块的下一块
+	 while (block_idx < file_will_use_blocks) {
+	    block_lba = block_bitmap_alloc(cur_part);
+	    if (block_lba == -1) {
+	       printk("file_write: block_bitmap_alloc for situation 2 failed\n");
+	       return -1;
+	    }
+
+	    if (block_idx < 12) {      // 新创建的0~11块直接存入all_blocks数组
+	       ASSERT(file->fd_inode->i_sectors[block_idx] == 0);      // 确保尚未分配扇区地址
+	       file->fd_inode->i_sectors[block_idx] = all_blocks[block_idx] = block_lba;
+	    } else {     // 间接块只写入到all_block数组中,待全部分配完成后一次性同步到硬盘
+	       all_blocks[block_idx] = block_lba;
+	    }
+
+	    /* 每分配一个块就将位图同步到硬盘 */
+	    block_bitmap_idx = block_lba - cur_part->sb->data_start_lba;
+	    bitmap_sync(cur_part, block_bitmap_idx, BLOCK_BITMAP);
+
+	    block_idx++;   // 下一个新扇区
+	 }
+	 ide_write(cur_part->my_disk, indirect_block_table, all_blocks + 12, 1);      // 同步一级间接块表到硬盘
+      } else if (file_has_used_blocks > 12) {
+	 /* 第三种情况:新数据占据间接块*/
+	 ASSERT(file->fd_inode->i_sectors[12] != 0); // 已经具备了一级间接块表
+	 indirect_block_table = file->fd_inode->i_sectors[12];	 // 获取一级间接表地址
+
+	 /* 已使用的间接块也将被读入all_blocks,无须单独收录 */
+	 ide_read(cur_part->my_disk, indirect_block_table, all_blocks + 12, 1); // 获取所有间接块地址
+
+	 block_idx = file_has_used_blocks;	  // 第一个未使用的间接块,即已经使用的间接块的下一块
+	 while (block_idx < file_will_use_blocks) {
+	    block_lba = block_bitmap_alloc(cur_part);
+	    if (block_lba == -1) {
+	       printk("file_write: block_bitmap_alloc for situation 3 failed\n");
+	       return -1;
+	    }
+	    all_blocks[block_idx++] = block_lba;
+
+	    /* 每分配一个块就将位图同步到硬盘 */
+	    block_bitmap_idx = block_lba - cur_part->sb->data_start_lba;
+	    bitmap_sync(cur_part, block_bitmap_idx, BLOCK_BITMAP);
+	 }
+	 ide_write(cur_part->my_disk, indirect_block_table, all_blocks + 12, 1);   // 同步一级间接块表到硬盘
+      } 
+   }
+
+   /* 用到的块地址已经收集到all_blocks中,下面开始写数据 */
+   bool first_write_block = true;      // 含有剩余空间的扇区标识
+   file->fd_pos = file->fd_inode->i_size - 1;   // 置fd_pos为文件大小-1,下面在写数据时随时更新
+   while (bytes_written < count) {      // 直到写完所有数据
+      memset(io_buf, 0, BLOCK_SIZE);
+      sec_idx = file->fd_inode->i_size / BLOCK_SIZE;
+      sec_lba = all_blocks[sec_idx];
+      sec_off_bytes = file->fd_inode->i_size % BLOCK_SIZE;
+      sec_left_bytes = BLOCK_SIZE - sec_off_bytes;
+
+      /* 判断此次写入硬盘的数据大小 */
+      chunk_size = size_left < sec_left_bytes ? size_left : sec_left_bytes;
+      if (first_write_block) {
+	 ide_read(cur_part->my_disk, sec_lba, io_buf, 1);
+	 first_write_block = false;
+      }
+      memcpy(io_buf + sec_off_bytes, src, chunk_size);
+      ide_write(cur_part->my_disk, sec_lba, io_buf, 1);
+
+      src += chunk_size;   // 将指针推移到下个新数据
+      file->fd_inode->i_size += chunk_size;  // 更新文件大小
+      file->fd_pos += chunk_size;
+      bytes_written += chunk_size;
+      size_left -= chunk_size;
+   }
+   inode_sync(cur_part, file->fd_inode, io_buf);
+   sys_free(all_blocks);
+   sys_free(io_buf);
+   return bytes_written;
+}
+```
+
+<h3>
+目录创建与读取
+</h3>
+
+
+<h3>
+
+</h3>
+
+loading
+
+
