@@ -6,9 +6,9 @@ import PageLayout from '@/layouts/CommonPage.astro'
 import ProjectSection from '@/components/projects/ProjectSection.astro'
 import Sponsors from '@/components/projects/Sponsors.astro'
 import Sponsorship from '@/components/projects/Sponsorship.astro'
-import alipay from '@/assets/alipay-qrcode.jpg'
+// import alipay from '@/assets/alipay-qrcode.jpg'
 import KeyIcon from '@/assets/icons/key.svg'
-import wechat from '@/assets/wechat-qrcode.jpg'
+// import wechat from '@/assets/wechat-qrcode.jpg'
 
 const headings = [
   { depth: 2, slug: 'programs', text: 'Programs' },
@@ -21,7 +21,7 @@ const headings = [
 
 <PageLayout title='Projects' {headings} view>
   {/* About astro-pure */}
-  <div class='not-prose flex justify-center'>
+  {/* <div class='not-prose flex justify-center'>
     <a
       href='/docs/advanced/about' target='_blank'
       class='flex items-center gap-x-3 rounded-full border bg-background px-4 py-2 text-sm shadow-sm transition-shadow hover:shadow-md'
@@ -45,10 +45,10 @@ const headings = [
   </p>
   <Button title='Checkout sponsorship' class='w-fit' href='#sponsorship'>
     <Icon class='size-5' name='receive-money' slot='before' />
-  </Button>
+  </Button> */}
 
   <h2 id='programs'>Programs</h2>
-  <ProjectSection
+  {/* <ProjectSection
     projects={[
       {
         name: '🎨 Astro Theme Pure',
@@ -93,10 +93,10 @@ const headings = [
         }
       ]}
     />
-  </Collapse>
+  </Collapse> */}
 
   <h2 id='learnings'>Learnings</h2>
-  <ProjectSection
+  {/* <ProjectSection
     class='my-2'
     projects={[
       {
@@ -118,10 +118,10 @@ const headings = [
         ]
       }
     ]}
-  />
+  /> */}
 
   <h2 id='others'>Others</h2>
-  <ProjectSection
+  {/* <ProjectSection
     projects={[
       {
         name: 'CWorld',
@@ -134,25 +134,27 @@ const headings = [
         links: [{ type: 'github', href: 'https://github.com/zhuozhiyongde' }]
       }
     ]}
-  />
+  /> */}
 
   <h2 id='gpg-signature'>GPG Signature</h2>
-  <p>
+  {/* <p>
     You can verify the authenticity of the files I signed by checking the GPG signature. My GPG key
     is <code>114514</code>, and you can find it on the opengpg key servers or download from it.
   </p>
   <Button href='https://keys.openpgp.org/search?q=114514' title='Checkout my key' target='_blank'>
     <KeyIcon class='size-5' slot='before' />
-  </Button>
+  </Button> */}
 
   <h2 id='sponsorship'>Sponsorship</h2>
-  <Sponsorship
+  {
+    /* <Sponsorship
     methods={[
       { name: 'WeChat', icon: 'wechat-pay', image: wechat },
       { name: 'Alipay', icon: 'alipay', image: alipay }
     ]}
-  />
-  <p>Please leave a message or contact me proactively after sponsorship. My email is:
+  /> */
+  }
+  {/* <p>Please leave a message or contact me proactively after sponsorship. My email is:
     <code style='cursor: pointer'
       onclick='const m=atob(this.textContent);alert(m);window.open(`mailto:${m}`,"_blank")'
     >Y3dvcmxkMEBxcS5jb20=</code>
@@ -177,7 +179,7 @@ const headings = [
       // 酷安@暴走の蜗牛
       { name: 'C*a', amount: 2, date: '2019-07-02' }
     ]}
-  />
+  /> */}
 </PageLayout>
 
 <style>

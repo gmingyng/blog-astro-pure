@@ -19,7 +19,9 @@ const footerLink1 = footerConf.links?.filter(({ pos }) => pos === 1) || []
 <footer class='mx-auto mb-5 mt-16 w-full'>
   <div class='border-t pt-5'>
     <div class='flex items-center gap-y-3 max-sm:flex-col sm:justify-between sm:gap-y-0'>
-      <div class='flex items-center gap-x-4 gap-y-2 text-muted-foreground max-sm:flex-col'>
+      <div
+        class='flex items-center gap-x-4 gap-y-2 text-sm text-muted-foreground max-sm:flex-col'
+      >
         { /* Position 1 */
           footerLink1.length > 0 && (
             <div>
@@ -34,36 +36,35 @@ const footerLink1 = footerConf.links?.filter(({ pos }) => pos === 1) || []
           )
         }
         {/* Position 2 */}
-        <div>
-          {config.footer.year}
-          {config.author}
+        <div class='flex flex-wrap items-center gap-x-2'>
+          <span>{config.footer.year}</span>
+          <span>{config.author}</span>
+
+          {
+            footerConf.credits && (
+              <span>
+                <a href='https://github.com/cworld1/astro-theme-pure' target='_blank'>
+                  Pure
+                </a>
+                theme powered
+              </span>
+            )
+          }
+
           {
             footerConf.links && footerConf.links.length > 0 && (
-              <>
-                &
-                <span>
-                  {footerConf.links
-                    .filter(({ pos }) => pos === 2)
-                    .map(({ title, link, style }) => (
-                      <span>
-                        <a href={link} target='_blank' class={style}>{title}</a>
-                      </span>
-                    ))}
-                </span>
-              </>
+              <div class='flex gap-x-2'>
+                {footerConf.links
+                  .filter(({ pos }) => pos === 2)
+                  .map(({ title, link, style }) => (
+                    <a href={link} target='_blank' class={style}>
+                      {title}
+                    </a>
+                  ))}
+              </div>
             )
           }
         </div>
-        {
-          footerConf.credits && (
-            <span>
-              <a href='https://github.com/withastro/astro' target='_blank'>Astro</a>
-              &
-              <a href='https://github.com/cworld1/astro-theme-pure' target='_blank'>Pure</a>
-              theme powered
-            </span>
-          )
-        }
       </div>
 
       {/* Social Brands */}
@@ -83,8 +84,11 @@ const footerLink1 = footerConf.links?.filter(({ pos }) => pos === 1) || []
 
 <style>
   footer a {
-    color: hsl(var(--foreground) / var(--un-text-opacity, 1));
-    text-decoration: underline;
+    color: inherit;
+    text-decoration: none;
     font-weight: 500;
+  }
+  footer a:hover {
+    color: hsl(var(--primary) / var(--un-text-opacity, 1));
   }
 </style>
