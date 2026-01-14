@@ -19,7 +19,15 @@ const MAX_POSTS = 10
 const allPosts = await getBlogCollection()
 const allPostsByDate = sortMDByDate(allPosts).slice(0, MAX_POSTS)
 
-const imagePath = config.logo.src
+// const imagePath = config.logo.src
+// Randomely select an image with probabilities
+const imagePathFromConfig = config.logo.src
+const alternateImagePath = '/src/assets/avatar1.jpg' // Adjust if needed
+const randomVal = Math.random()
+
+// 10% chance for avatar1.jpg, 90% chance for config.logo.src
+const imagePath = randomVal < 0.1 ? alternateImagePath : imagePathFromConfig
+
 const images = import.meta.glob<{ default: ImageMetadata }>(
   '/src/assets/*.{jpeg,jpg,png,gif,avif,webp}'
 )
