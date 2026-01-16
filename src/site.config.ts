@@ -129,8 +129,15 @@ export const integ: IntegrationUserConfig = {
     // server: 'http://api.quotable.io/quotes/random?maxLength=60',
     // target: `(data) => data[0].content || 'Error'`
     // - DummyJSON
-    server: 'https://dummyjson.com/quotes/random',
-    target: `(data) => (data.quote.length > 80 ? \`\${data.quote.slice(0, 80)}...\` : data.quote || 'Error')`
+    // server: 'https://dummyjson.com/quotes/random',
+    // target: `(data) => (data.quote.length > 80 ? \`\${data.quote.slice(0, 80)}...\` : data.quote || 'Error')`
+    // 指向本地生成的静态文件
+    server: '/quotes.json',
+    // 随机选择数组中的一个句子
+    target: `(data) => {
+      const item = data[Math.floor(Math.random() * data.length)];
+      return item ? item.content : 'Error';
+    }`
   },
   // [Typography]
   // https://unocss.dev/presets/typography
