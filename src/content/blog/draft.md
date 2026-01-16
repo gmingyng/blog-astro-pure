@@ -1,7 +1,7 @@
 ---
 title: 'Draft Page'
-publishDate: '2025-07-03'
-updatedDate: '2025-07-10'
+publishDate: '2023-07-03'
+updatedDate: '2023-07-10'
 description: 'Draft page for any purpose'
 tags:
   - Draft

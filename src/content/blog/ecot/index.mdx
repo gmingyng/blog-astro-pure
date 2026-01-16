@@ -1,19 +1,19 @@
 ---
 title: Language-driven VLA
-publishDate: 2026-01-14 08:00:00
+publishDate: 2026-01-15 15:05:00
 description: '探索Language在VLA中的作用, 哪些是真正能起效果的范式'
 tags:
   - vla
   - robotics
   - ai
+  - cot
 heroImage: { src: './thumbnail.jpg', color: '#B4C6DA' }
 language: 'Chinese'
-draft: true
 ---
 
-> 我们对VLA通常期望强大的语言遵循能力以及其带来的泛化能力，然而在实际实验里，L的表现并不理想， VLA真正能理解语言吗，还是只把L当作长一点的id。<br />
-> 现在的VLA似乎更像是VA，L被V淹没，实际上只是一个参数量更大一点的模仿学习罢了。<br />
-> 遵循这个疑问，我阅读了一些相关论文，在此列出。
+> 我们对VLA通常期望强大的语言遵循能力以及其带来的泛化能力，然而在实际实验里，L的表现并不理想。现在的VLA似乎更像是VA，L被V淹没，实际上只是一个参数量更大一点的模仿学习罢了。<br />
+> VLA真正能理解语言吗，还是只把L当作长一点的id?<br />
+> 遵循这个疑问，在这里更新一些我读过的相关论文。
 
 ## ECoT
 [paper](https://arxiv.org/abs/2407.08693)
@@ -34,9 +34,34 @@ draft: true
 4. 最后用Gemini1.0总结并设定推理链，拼接成长文本输入
 
 ### Arch
-Backbone: OpenVLA-7B 
+Backbone: OpenVLA-7B   
+Prompt: task+plan+subtask+move+gripper&obj+action  
 Loss&Reward: 自回归交叉熵损失
 
+
+### Experiments
+Benchmark:基于WidowX，任务包括OOD objects + OOD instructions等  
+Ablation:
+  1. Naïve CoT vs. ECoT
+  2. 在加入人类干预的情况下(允许一次中断给出人类反馈):Naïve CoT vs. ECoT
+  3. 推理加速
+
+### Conclusion
+1. 通过ecot方法，在不增加演示数据的情况下，显著提升了策略的泛化能力
+2. 发现推理链通常与执行的动作有很强的相关性
+3. ecot方法导致的大量推理token显著增大了推理延迟
+4. 推理的结构与深度均固定，且开环执行，无法根据任务难度与环境反馈动态调整
+
+
+## Next
+
+### Question
+
+### Motivation
+
+### Data
+
+### Arch
 
 ### Experiments
 
