@@ -1,0 +1,31 @@
+---
+title: NIPS2025-B1K冠军方案笔记
+publishDate: 2026-01-15 15:05:00
+description: 'Task adaptation of Vision-Language-Action model: 1st Place Solution for the 2025 BEHAVIOR Challenge'
+tags:
+  - vla
+  - robotics
+  - ai
+  - pi05
+heroImage: { src: './thumbnail.jpg', color: '#B4C6DA' }
+language: 'Chinese'
+draft: true
+---
+## 场景
+在基于 NVIDIA Isaac Sim 的 OmniGibson 模拟环境中，执行50种多样化的长时程家庭任务——并非多个独立任务的组合而是长程连续任务
+要求双臂协助，导航和情景感知决策
+
+## 挑战
+1. 长程任务固有的累积误差
+2. 在视觉上很多任务是非马尔可夫状态的
+3. 数据里并没有从失败中恢复的案例
+4. 任务允许多模态行为
+
+## 训练
+1. 机器人动作之间存在强烈相关性(时间与关节运动之间)
+2. 引入阶段跟踪器
+3. 通过启发式学习检测失败并恢复
+3. 可学习的混合层注意力，action expert每层不再只用复用backbone对应层的注意力，而是允许每层关注所有VLM层的线性组合
+5. 滚动窗口平滑动作
+
+## 推理
